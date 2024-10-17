@@ -1,7 +1,7 @@
 # train a miniature character-level shakespeare model
 # good for debugging and playing on macbooks and such
 
-out_dir = 'out-shakespeare-char'
+out_dir = 'out-shakespeare-char-cepred'
 eval_interval = 250 # keep frequent because we'll overfit
 eval_iters = 200
 log_interval = 10 # don't print too too often
@@ -10,7 +10,7 @@ log_interval = 10 # don't print too too often
 always_save_checkpoint = False
 
 wandb_log = False # override via command line if you like
-wandb_project = 'shakespeare-char'
+wandb_project = 'shakespeare-char-cepred'
 wandb_run_name = 'mini-gpt'
 
 dataset = 'shakespeare_char'
@@ -33,8 +33,8 @@ beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
 warmup_iters = 100 # not super necessary potentially
 
 # on macbook also add
-device = 'cpu'  # run on cpu only
+# device = 'cpu'  # run on cpu only
 # compile = False # do not torch compile the model
 
 # CE predictor weight
-ce_pred_lambda = 0.5
+ce_pred_lambda = 0.1

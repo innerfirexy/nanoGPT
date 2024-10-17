@@ -114,6 +114,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    ce_pred_lambda: float = 0.0
 
 class GPT(nn.Module):
 
@@ -141,7 +142,7 @@ class GPT(nn.Module):
         self.ce_predictor = nn.Sequential(
             nn.Linear(config.n_embd, 1),
             nn.LeakyReLU(0.1))
-        self.ce_pred_lambda = 0.5
+        self.ce_pred_lambda = config.ce_pred_lambda
 
         # init all weights
         self.apply(self._init_weights)
