@@ -116,6 +116,8 @@ class GPTConfig:
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     ce_pred_lambda: float = 0.0
 
+SKIPPED_SD_KEYS = ['ce_predictor.0.weight', 'ce_predictor.0.bias']
+
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -141,7 +143,7 @@ class GPT(nn.Module):
         # the MLP for predicting the cross entropy 
         self.ce_predictor = nn.Sequential(
             nn.Linear(config.n_embd, 1),
-            nn.LeakyReLU(0.1))
+            nn.ReLU(0.1))
         self.ce_pred_lambda = config.ce_pred_lambda
 
         # init all weights
@@ -174,32 +176,32 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
-        device = idx.device
-        b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+    # def forward(self, idx, targets=None):
+    #     device = idx.device
+    #     b, t = idx.size()
+    #     assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+    #     pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
+    #     # forward the GPT model itself
+    #     tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+    #     pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+    #     x = self.transformer.drop(tok_emb + pos_emb)
+    #     for block in self.transformer.h:
+    #         x = block(x)
+    #     x = self.transformer.ln_f(x)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
+    #     if targets is not None:
+    #         # if we are given some desired targets also calculate the loss
+    #         logits = self.lm_head(x)
+    #         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+    #     else:
+    #         # inference-time mini-optimization: only forward the lm_head on the very last position
+    #         logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+    #         loss = None
 
-        return logits, loss
+    #     return logits, loss
     
-    def forward2(self, idx, targets=None):
+    def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -285,7 +287,19 @@ class GPT(nn.Module):
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        try:
+            assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        except AssertionError:
+            if len(sd_keys) > len(sd_keys_hf):
+                print(f"missing keys in hf model: {set(sd_keys) - set(sd_keys_hf)}")
+                diff = list(set(sd_keys) - set(sd_keys_hf))
+            else:
+                print(f"missing keys in nanoGPT model: {set(sd_keys_hf) - set(sd_keys)}")
+                diff = list(set(sd_keys_hf) - set(sd_keys))
+            for k in diff:
+                if k not in SKIPPED_SD_KEYS:
+                    raise
+
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose

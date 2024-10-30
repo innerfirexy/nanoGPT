@@ -37,4 +37,4 @@ warmup_iters = 100 # not super necessary potentially
 # compile = False # do not torch compile the model
 
 # CE predictor weight
-ce_pred_lambda = 0.1
+ce_pred_lambda = 0.5
