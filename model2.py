@@ -106,7 +106,7 @@ class Block(nn.Module):
         return x
 
 @dataclass
-class GPTConfig:
+class GPTxConfig:
     block_size: int = 1024
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
@@ -114,8 +114,11 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    ce_pred_lambda: float = 0.0
 
-class GPT(nn.Module):
+SKIPPED_SD_KEYS = ['ce_predictor.0.weight', 'ce_predictor.0.bias']
+
+class GPTx(nn.Module):
 
     def __init__(self, config):
         super().__init__()
@@ -136,6 +139,12 @@ class GPT(nn.Module):
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # the MLP for predicting the cross entropy 
+        self.ce_predictor = nn.Sequential(
+            nn.Linear(config.n_embd, 1),
+            nn.ReLU(0.1))
+        self.ce_pred_lambda = config.ce_pred_lambda
 
         # init all weights
         self.apply(self._init_weights)
@@ -167,6 +176,31 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    # def forward(self, idx, targets=None):
+    #     device = idx.device
+    #     b, t = idx.size()
+    #     assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+    #     pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+    #     # forward the GPT model itself
+    #     tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+    #     pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+    #     x = self.transformer.drop(tok_emb + pos_emb)
+    #     for block in self.transformer.h:
+    #         x = block(x)
+    #     x = self.transformer.ln_f(x)
+
+    #     if targets is not None:
+    #         # if we are given some desired targets also calculate the loss
+    #         logits = self.lm_head(x)
+    #         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+    #     else:
+    #         # inference-time mini-optimization: only forward the lm_head on the very last position
+    #         logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+    #         loss = None
+
+    #     return logits, loss
+    
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
@@ -184,13 +218,21 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            
+            ce_pred = self.ce_predictor(x)
+            ce_loss_val = ce_loss.detach().item()
+            ce_pred_loss = F.mse_loss(ce_pred, torch.tensor(ce_loss_val, device=device))
+
+            loss = ce_loss * (1.0 - self.ce_pred_lambda) + self.ce_pred_lambda * ce_pred_loss
+
+            return logits, loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            ce_pred = self.ce_predictor(x[:, [-1], :])
             loss = None
-
-        return logits, loss
+            return logits, ce_pred, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -228,8 +270,8 @@ class GPT(nn.Module):
             print(f"overriding dropout rate to {override_args['dropout']}")
             config_args['dropout'] = override_args['dropout']
         # create a from-scratch initialized minGPT model
-        config = GPTConfig(**config_args)
-        model = GPT(config)
+        config = GPTxConfig(**config_args)
+        model = GPTx(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
@@ -245,7 +287,19 @@ class GPT(nn.Module):
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        try:
+            assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        except AssertionError:
+            if len(sd_keys) > len(sd_keys_hf):
+                print(f"missing keys in hf model: {set(sd_keys) - set(sd_keys_hf)}")
+                diff = list(set(sd_keys) - set(sd_keys_hf))
+            else:
+                print(f"missing keys in nanoGPT model: {set(sd_keys_hf) - set(sd_keys)}")
+                diff = list(set(sd_keys_hf) - set(sd_keys))
+            for k in diff:
+                if k not in SKIPPED_SD_KEYS:
+                    raise
+
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
